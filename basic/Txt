@@ -1,0 +1,90 @@
+   wordQueryTest.cpp（用户代码）
+        │
+        ├── Query       ← 把手：用户只碰这个
+        │      └── shared_ptr──► WordQuery   ← 真正干活
+        │                              └── eval() 调用 TextQuery::query()
+        ├── TextQuery   ← 建索引 / 查表
+        └── QueryResult ← 结果容器（三样数据）
+                 └── print() 自由函数负责展示
+
+用户: Query name("stock");              ← 行为组：造一个查询
+      name.eval(file);
+          │
+          ▼
+      Query::eval → q->eval(t)         ← 把手转发
+          │
+          ▼
+      WordQuery::eval
+          │  return t.query("stock")   ← 交给数据组
+          ▼
+      TextQuery::query
+          │  wm.find("stock") → {0,3,4,10,12}
+          │  打包成 QueryResult
+          ▼
+      QueryResult{sought="stock", lines={0,3,4,10,12}, file=...}
+          │
+          ▼
+      print  →  屏幕
+
+
+Query：把手，用户唯一入口
+class Query {
+public:
+    Query(const std::string &s) : q(new WordQuery(s)) { }
+    QueryResult eval(const TextQuery &t) const { return q->eval(t); }
+    std::string rep() const { return q->rep(); }
+private:
+    std::shared_ptr<WordQuery> q;
+};
+Query 不是查询本身，它只是指向查询对象的句柄。 真正的查询对象是 WordQuery；Query 负责让你方便地拿着它。
+
+
+WordQuery：查询树的一个节点
+class WordQuery {
+public:
+    explicit WordQuery(const std::string &s) : query_word(s) { }
+    QueryResult eval(const TextQuery &t) const { return t.query(query_word); }
+    std::string rep() const { return query_word; }
+private:
+    std::string query_word;
+};
+它自己几乎不做事。 真正的查表在 TextQuery::query 里。WordQuery 的职责是把“查一个词”包装成一个“可以执行的对象”，这样上层能统一调度。
+
+
+TextQuery：索引 + 查表（数据层）
+class TextQuery {
+public:
+    TextQuery(std::ifstream &);
+    QueryResult query(const std::string &) const;
+private:
+    std::shared_ptr<std::vector<std::string>> file;                        // 原文
+    std::map<std::string, std::shared_ptr<std::set<int>>> wm;              // 倒排表
+};
+这个类是整个程序的数据中心。
+
+
+QueryResult：结果容器（数据层）
+class QueryResult {
+    friend std::ostream &print(std::ostream &, const QueryResult &);
+public:
+    using line_no = int;
+    using line_it = std::set<int>::const_iterator;
+
+    QueryResult(std::string s,
+                std::shared_ptr<std::set<int>> p,
+                std::shared_ptr<std::vector<std::string>> f)
+        : sought(s), lines(p), file(f) { }
+
+    std::set<int>::size_type size() const { return lines->size(); }
+    line_it begin() const { return lines->begin(); }
+    line_it end() const   { return lines->end(); }
+    std::shared_ptr<std::vector<std::string>> get_file() { return file; }
+
+private:
+    std::string sought;                          // 查的是什么
+    std::shared_ptr<std::set<int>> lines;        // 命中哪几行
+    std::shared_ptr<std::vector<std::string>> file;  // 原文在哪
+};
+它不判对错，也不思考，它只打包。
+
+
