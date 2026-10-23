@@ -1,0 +1,128 @@
+wordQueryTest.cpp（用户代码）
+      │
+      ├── Query        ← 把手：用户只碰这个
+      │      └── shared_ptr──► Query_base   ← 基类指针，指向具体查询
+      │                              └── WordQuery   ← 真正干活（派生自 Query_base）
+      │                                     └── eval() 调用 TextQuery::query()
+      ├── TextQuery    ← 建索引 / 查表
+      └── QueryResult  ← 结果容器（三样数据）
+               └── print() 自由函数负责展示
+
+
+用户: Query name("stock");              ← 行为组：造一个查询
+      name.eval(file);
+          │
+          ▼
+      Query::eval → q->eval(t)         ← 把手转发
+          │
+          ▼
+      Query_base 的虚函数表            ← ★ 新增层：静态类型是基类，动态类型是 WordQuery
+          │  （虚调用，运行期决定）
+          ▼
+      WordQuery::eval
+          │  return t.query("stock")   ← 交给数据组
+          ▼
+      TextQuery::query
+          │  wm.find("stock") → {0,3,4,10,12}
+          │  打包成 QueryResult
+          ▼
+      QueryResult{sought="stock", lines={0,3,4,10,12}, file=...}
+          │
+          ▼
+      print  →  屏幕
+
+
+
+Query：把手，用户唯一入口
+class Query {
+public:
+    Query(const std::string &);                                  // 造一个 WordQuery（定义在 WordQuery 之后）
+    QueryResult eval(const TextQuery &t) const { return q->eval(t); }
+    std::string rep() const { return q->rep(); }
+private:
+    std::shared_ptr<Query_base> q;      // ★ 指向基类，不是 WordQuery
+};
+数据成员	只有一个 q，类型是 shared_ptr<Query_base>
+构造函数	只声明在类里，定义放到 WordQuery 之后（第 46 行），因为函数体要 new WordQuery，此时 WordQuery 必须已经完整定义
+eval/rep	非虚函数，只做转调；它们内部那句 q->eval(t) 才是虚调用
+Query 不是查询本身，它只是指向查询对象的句柄。真正的查询对象是 Query_base 的派生类；Query 负责让你方便地拿着它，而且不需要知道它到底是哪种查询。
+
+
+Query_base：抽象接口
+class Query_base {
+    friend class Query;                    // 让 Query 能调下面的私有成员
+protected:
+    using line_no = TextQuery::line_no;    // ★ = int
+    virtual ~Query_base() = default;       // 保护的虚析构
+private:
+    virtual QueryResult eval(const TextQuery &) const = 0;   // 纯虚：求值
+    virtual std::string rep() const = 0;                     // 纯虚：字符串形式
+};
+它是什么	            没有数据成员、没有 public 成员的抽象基类；本身不能创建对象，只规定派生类必须实现什么
+eval(...) = 0 纯虚私有	所有查询类型必须能求值；private 表示只有 Query 能调用这些函数
+rep() = 0 纯虚私有	    所有查询类型必须能描述自己
+friend class Query;	    私有成员唯一开放访问的对象；没有这一行，Query::eval 里的 q->eval(t) 会编译失败
+protected virtual ~Query_base()	禁止    delete Query_base*（编译期报错）；shared_ptr 销毁时绑定的删除器是 WordQuery，可以正确调用派生类析构
+using line_no = TextQuery::line_no	    行号别名的统一出口；本次是 int，派生类和 QueryResult 都从这一条链路对齐
+
+
+WordQuery：唯一的具体类
+class WordQuery : public Query_base {
+    friend class Query;                    // 让 Query 能调私有的构造函数
+    WordQuery(const std::string &s) : query_word(s) { }
+
+    QueryResult eval(const TextQuery &t) const { return t.query(query_word); }
+    std::string rep() const { return query_word; }
+
+    std::string query_word;
+};
+它自己几乎不做事。真正的查表在 TextQuery::query 里。WordQuery 的职责是把“查一个词”包装成一个可以执行的对象，这样上层能统一调度（统一调用 eval/rep，无需区分类型）。
+
+
+
+TextQuery：索引 + 查表（数据层）
+class TextQuery {
+public:
+    TextQuery(std::ifstream &);
+    QueryResult query(const std::string &) const;
+private:
+    std::shared_ptr<std::vector<std::string>> file;               // 原文
+    std::map<std::string, std::shared_ptr<std::set<int>>> wm;     // ★ 倒排表（行号 int）
+};
+
+
+
+QueryResult：结果容器（数据层）
+class QueryResult {
+    friend std::ostream &print(std::ostream &, const QueryResult &);
+public:
+    using line_no = int;
+    using line_it = std::set<int>::const_iterator;
+
+    QueryResult(std::string s,
+                std::shared_ptr<std::set<int>> p,
+                std::shared_ptr<std::vector<std::string>> f)
+        : sought(s), lines(p), file(f) { }
+
+    std::set<int>::size_type size() const { return lines->size(); }
+    line_it begin() const { return lines->begin(); }
+    line_it end()   const { return lines->end(); }
+    std::shared_ptr<std::vector<std::string>> get_file() { return file; }
+
+private:
+    std::string sought;                              // 查的是什么
+    std::shared_ptr<std::set<int>> lines;            // 命中哪几行（int）
+    std::shared_ptr<std::vector<std::string>> file;  // 原文在哪
+};
+它不判断对错，也不思考，它只打包一次查询的结论；至于怎么显示，交给 print。
+
+
+
+
+Query 必须持有基类指针，否则它只能表示“单词查询”。持有 Query_base* 之后才有扩展可能。
+Query_base 的 eval/rep 必须是虚函数，否则通过基类指针调用时只会执行基类的空实现（纯虚的话直接编译报错，正好拦住）。
+eval/rep 必须是「纯虚」而不是普通虚函数，否则 Query_base 可以实例化，“只有具体查询才能求值”这条规则就失效了。
+Query 必须能访问这些 private 成员，所以需要 friend class Query;；这是唯一手段，因为 private 成员除了本类就是好友能访问。
+WordQuery 构造必须私有且 Query 是其友元，否则用户能绕过 Query 直接造节点，得到一个“建得出、用不了……”的对象（eval 调不到）——基础版里 eval 是 public 的，所以这里必须私有两处，逻辑才自洽。
+析构必须 protected 且 virtual，否则 delete Query_base* 会出问题；而 shared_ptr 的删除器绑定的是 WordQuery，所以保护起来不影响释放。
+QueryResult 用 shared_ptr 持有结果，因为结果集可能直接来自 wm 里那个 set；共享而不是拷贝，是这个问题“几乎零开销”的关键。
